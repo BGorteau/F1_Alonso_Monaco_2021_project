@@ -1,0 +1,265 @@
+---
+title: "Formule 1 | Grand Prix de Monaco 2021 | Fernando Alonso"
+author: "Baptiste Gorteau & Théo Cavenne"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+# Description des données
+```{r, include=FALSE}
+# Import des packages :
+library(fda)
+#library(tidyfun)
+library(viridis)
+library(tidyverse)
+library(RColorBrewer)
+```
+
+```{r echo=FALSE}
+# Répertoire de travail :
+#setwd("~/Desktop/M2 MAS/Signaux/Projet")
+```
+
+Pour ce projet, nous avons décidé d'étudier la vitesse de Fernando Alonso lors du Grand Prix de Formule 1 de Monaco en 2021.
+
+Les jeux de données que nous allons utiliser sont les suivant :
+
+  - "laps.csv" : Récapitulatif avec différentes informations pour chaque tour effectué par Fernando Alonso (temps au tour, numéro du tour, type de pneus utilisées, etc.). Les seules variables que nous allons utiliser dans ce jeu de données sont "LapNumber" (numéro du tour), "PitOutTime" et "PitInTime" (moments où Alonso est entré ou sorti des stands). On nommera ce jeu de données "laps_alonso" :
+```{r echo=FALSE}
+laps_alonso <- read.csv("Data/ALO/laps.csv")
+print("laps_alonso")
+print((laps_alonso %>% select(LapNumber,PitOutTime,PitInTime))[c(1,45,46),])
+```
+  - "lap_i.0.csv" (pour i allant de 1 à 77) : On aura ici 77 jeux de données différents représentant chacun un tour du GP 2021 de Monaco effectué par Fernando Alonso. Pour chacun de ces jeux de données (tours), on aura plusieurs couples Distance/Vitesse qui représentent la vitesse mesurée à une distance précise de la ligne de départ pour un tour. On va donc concaténer ces 77 jeux de données afin de n'avoir qu'un seul dataframe (24861 lignes et 3 colonnes) composée des variables "Distance" (distance en mètres par rapport à la ligne de départ du points de mesure de la vitesse), "Speed" (vitesse en km/h mesurée) et "lap" (numéro du tour (1 à 77)). On nommera ce jeu de données "ALO" :
+  
+```{r echo=FALSE}
+ALO <- read.csv(paste("Data/ALO/tours/lap_1.0.csv",sep = "")) %>% select(Distance,Speed) %>% mutate(lap=1)
+for(i in 2:length(laps_alonso$LapNumber)){
+  lap <- read.csv(paste("Data/ALO/tours/lap_",i,".0.csv",sep = "")) %>% select(Distance,Speed) %>% mutate(lap=i)
+  ALO <- rbind(ALO,lap)
+}
+print("ALO")
+print(head(ALO,10))
+```
+
+Pour faciliter notre étude, nous avons décidé d'enlever le premier tour et les tours de changements de pneus de notre jeu de données car on estime qu'ils ne sont pas représentatifs d'un tour "normal" d'un Grand Prix.
+
+Indices des tours concernés :
+```{r echo = FALSE}
+delete_tour = sort(c(which(laps_alonso$PitOutTime!=""), which(laps_alonso$PitInTime!="")))
+delete_tour
+```
+
+
+```{r echo=FALSE}
+ALO <- ALO %>% filter(!(lap %in% delete_tour))
+ALO$lap <- as.factor(ALO$lap)
+```
+
+## Visualisation de la courbe de la vitesse (en fonction de la distance à la ligne de départ) du 2ème tour :
+
+```{r echo=FALSE}
+lap2 <- ALO %>% filter(lap==2)
+plot(lap2$Distance,lap2$Speed,pch=20,cex=0.5,xlab="Distance",ylab="Speed",main="Lap 2")
+```
+
+## Visualisation des courbes de vitesse pour tous les tours :
+
+```{r echo=FALSE}
+xrange = range(ALO$Distance)
+yrange = range(ALO$Speed)
+plot(seq(xrange[1],xrange[2],length=50),seq(yrange[1],yrange[2],length=50),type="n",main="Courbes observées",xlim=xrange,ylim=yrange,xlab="Distance",ylab="Speed")
+for (i in unique(ALO$lap)){
+  datap = ALO[which(ALO$lap==i),]
+  lines(datap$Distance,datap$Speed,col=i)
+}
+```
+
+Les représentations de la vitesse pour chaque tour semblent être réguilières et non-périodiques. Nous avons donc décidé de ne pas étudier les bases de Fourier ainsi que les bases d'ondelettes. Nous allons, pour la suite, nous concentrer sur les bases de splines cubiques. 
+
+# Choix des noeuds de la base de splines cubique
+
+## Première base
+
+Sur la représentation des courbes observées ci-dessus, on remarque qu'il y a 24 changements "brutaux" (pics) entre accélération et décélération. On a donc décidé de choisir nos noeuds "à la main". Les 24 noeuds choisis représentent les distances des entrées et des sorties de ces virages (par rapport à la ligne de départ).
+
+```{r echo=FALSE}
+# Choix des noeuds
+knots <- c(75,220,575,780,835,900,1020,1115,1180,1245,1290,1325,1360,1415,1900,2090,2260,2355,2565,2705,2785,2880,2930,2975)
+print("Noeuds choisis :")
+print(knots)
+```
+
+```{r echo=FALSE}
+knots <- c(xrange[1],knots,xrange[2])
+```
+On aura ici une base de splines d'ordre 4 avec 24 noeuds intérieurs et donc 28 fonctions de bases : 
+
+```{r echo=FALSE}
+# Création de la base de splines avec les noeuds choisis :
+bspbasis = create.bspline.basis(xrange,norder=4,breaks=knots)
+```
+
+ - Projection des courbes individuelles sur la base de splines choisie :
+ 
+```{r echo=FALSE}
+laps = unique(ALO$lap)
+nb_laps = length(laps)
+CoeffMat = matrix(0,nrow=nb_laps,ncol=bspbasis$nbasis)
+for (i in 1:nb_laps){
+  decomp = Data2fd(ALO$Distance[ALO$lap==laps[i]],ALO$Speed[ALO$lap==laps[i]],basisobj = bspbasis)
+  CoeffMat[i,] = as.vector(decomp$coefs)
+}
+head(CoeffMat)
+```
+ 
+ - Visualisation des courbes lissées :
+
+```{r echo=FALSE}
+alo.smooth = fd(t(CoeffMat),bspbasis)  
+plot(alo.smooth,xlab="Distance",ylab="Speed",main="Courbes lissées")
+```
+On observe qu'il manque 2 changements "brutaux" entre accélération et décélération" entre 1100 et 1450 ainsi que 2 entre 2275 et 3000.
+
+## Deuxième base
+
+On va donc réutiliser la même base en ajoutant 5 noeuds supplémentaires dans chacun de ces intervalles (on ajoutera donc 10 noeuds au total).
+On aura dans ce cas ci une base de splines d'ordre 4 avec 34 noeuds intérieurs et donc 38 fonctions de bases.
+
+ - Visualisation des courbes lissées :
+
+```{r echo=FALSE}
+knots <- sort(c(knots,seq(1100,1450,length=5),seq(2775,3000,length=5)))
+
+bspbasis = create.bspline.basis(xrange,norder=4,breaks=knots)
+
+CoeffMat = matrix(0,nrow=nb_laps,ncol=bspbasis$nbasis)
+for (i in 1:nb_laps){
+  decomp = Data2fd(ALO$Distance[ALO$lap==laps[i]],ALO$Speed[ALO$lap==laps[i]],basisobj = bspbasis)
+  CoeffMat[i,] = as.vector(decomp$coefs)
+}
+alo.smooth = fd(t(CoeffMat),bspbasis)  
+plot(alo.smooth,xlab="Distance",ylab="Speed",main="Courbes lissées")
+```
+Ces représentations nous semblent très satisfaisantes. Nous allons donc retenir la base de splines créée ci-dessus pour la suite.
+
+# Statistiques exploratoires
+
+## Étude de la moyenne et de la variance
+
+### Moyenne et écart-type fonctionnels
+
+```{r echo = FALSE}
+plot(alo.smooth,col="gray",xlab="distance",ylab="speed", main = "Moyenne et variance des tours lissés")
+fhat <- eval.fd(seq(xrange[1],xrange[2],length.out=325),alo.smooth)
+mean_lap <- mean.fd(alo.smooth)
+lines(mean_lap)
+sd_lap <- sd.fd(alo.smooth)
+lines(mean_lap+2*sd_lap,lwd=2,col=4,lty=2)
+lines(mean_lap-2*sd_lap,lwd=2,col=4,lty=2)
+legend("bottomleft",legend = c("Moyenne", "Écart-type"), col=c("black", "blue"), lty=1:2, cex=0.8)
+```
+
+Nous remarquons sur ce graphique qu'une majeure partie des courbes se trouvent dans l'intervalle de la variance. On peut observer une variance plus forte lors des moments de changements entre accélération et décéleration (maximums et minimums locaux). Au contraire, le reste du temps, la vitesse varie très peu selon les tours. Il est intéressant de noter que la variance au freinage est plus élevé lorsque le freinage est fort (comparaison entre le freinage à 1700m et celui à 2500m).
+
+## Covariance et corrélation
+
+### Covariance 
+
+```{r echo = FALSE}
+covspeed = var.fd(alo.smooth)
+surfcov = eval.bifd(seq(min(ALO$Distance),max(ALO$Distance),length=325),seq(min(ALO$Distance),max(ALO$Distance),length=325),covspeed)
+```
+
+```{r echo = FALSE}
+filled.contour(surfcov)
+```
+
+```{r echo = FALSE}
+plot_ly(z = surfcov, type = "surface")
+```
+
+Nous rencontrons un problème que nous n'arrivons pas à résoudre. Au niveau des valeurs très proche de zéro, la covariance est extrèmement élevée. Nous avons donc décider de tronquer nos intervalles de mesures de sorte que ce pic ne soit plus visible.
+
+```{r echo = FALSE}
+plot_ly(z = surfcov[3:325,3:325], type = "surface")
+```
+
+Sur cette représentation on remarque des covariances plutôt faibles. Cependant, on remarque un pic vers la fin du tour (mesure 278). On peut donc penser qu'il y a une forte variation des courbes entre elles sur la fin du circuit. Nous pouvons penser que ce point corespond au freinage au bout de 2.5km. Les variations au niveau de ce point sont observables sur la représentation de la variance plus haut.
+
+### Corrélation
+
+```{r echo = FALSE}
+corspeed = cor.fd(seq(1,max(ALO$Distance),length=100),alo.smooth)
+```
+
+```{r echo = FALSE}
+plot_ly(z = corspeed, type = "surface")
+```
+
+Grâce à ce graphique, on peut clairement voir qu'il y a une forte corrélation entre des points qui se suivent. Un point x et x+1 vont être très corrélés entre eux. Ce qui est logique à la vue de nos données. Ce graphique ne nous apporte pas une grande information.
+
+## ACP fonctionnelle
+
+```{r echo = FALSE}
+ACPF = pca.fd(alo.smooth,nharm=2,centerfns = TRUE)
+ACPF$varprop
+cumsum(ACPF$varprop)
+```
+
+Ici, les deux premières composantes principales expliquent 54% des données.
+
+```{r echo = FALSE}
+par(mfrow=c(1,2))
+plot(mean_lap, main ="Moyenne des courbes lissées")
+plot(ACPF$harmonics, main="Composantes principales")
+legend("topright", legend = c("Composante 1", "Composante 2"), col=c("black", "red"), lty=1:2, cex=0.5)
+par(mfrow=c(1,1))
+```
+
+Nous pouvons observer sur le graphique de droite les représentations des composantes principales de l'ACP réalisée. La courbe noir est celles captant le plus d'informations sur les données. Cette même courbe sépare surtout les données en fonction du premier kilomètre et du secteur aux alentours de 2,5km.
+
+```{r echo = FALSE}
+head(ACPF$scores)
+plot(ACPF$scores[,1],ACPF$scores[,2],pch=3,xlab="FPC 1", ylab="FPC 2",type="n")
+nomstours <- unique(ALO$lap)
+type_pneu <- as.factor(laps_alonso$Compound)
+text(ACPF$scores[,1],ACPF$scores[,2],labels=nomstours,cex=0.7,col=as.numeric(type_pneu))
+```
+
+Ce graphique permet de visualiser dans un premier temps que l'axe 2 sépare le tour 48 des autres tours.
+Nous allons donc regarder quel était ce tour.
+
+```{r echo = FALSE}
+plot(mean_lap)
+lines(ALO[ALO$lap==48,]$Distance,ALO[ALO$lap==48,]$Speed, col="red")
+```
+
+En effet, on remarque que sur ce tour, Ferando Alonso a freiné anormalement dès le début du tour (400m). De plus, le pic du deuxième axe principal correspond à cette distance d'environ 400m.
+
+C'est ce freinage qui fait que ce tour est différent des autres.
+
+Si on revient à la projection des tours sur les axes, on remarque que l'axe 1 sépare plutôt bien les tours éffectués en pneu medium (couleur noir) de ceux éffectués en pneu soft (couleur rouge). 
+
+Lorsqu'on reprend la représentation de la variance et l'analyse qui en avait été faite, on peut alors penser que le type de pneus va avoir une influence sur les freinages et sur les accélérations. Pour essayer de confrmer cette hypothèse, nous regardons quels types de pneus sont utilisés lors du freinage à 2,5km. 
+
+```{r}
+for(i in 1:nrow(laps_alonso))
+if(laps_alonso$Compound[i]=="MEDIUM"){
+  laps_alonso$color[i]="black"
+} else if(laps_alonso$Compound[i]=="SOFT"){
+  laps_alonso$color[i]="red"
+}
+
+plot(seq(xrange[1],xrange[2],length=50),seq(yrange[1],yrange[2],length=50),type="n",main="Courbes observées",xlab="Distance",ylab="Speed", xlim=c(2350, 2700),ylim=c(175,250))
+
+for (i in unique(ALO$lap)){
+  datap = ALO[which(ALO$lap==i),]
+  lines(datap$Distance,datap$Speed,col=laps_alonso$color[which(laps_alonso$LapNumber==i)])
+}
+```
+
+Ce graphique nous permet d'observer que la vitesse avant freinage est en général plus faible pour les tours en pneus medium qu'en pneus soft. Cela confirme notre hypothèse.
+
+De ce que nous avons pu observer, les moments de freinage à 250m, à 800m et à 2.5km sont sûrement les endroits du circuit où Ferando Alonso peut gagner (ou perdre) le plus temps sur son tour. Le type de pneu va également jouer sur son freinage à ces instants.
